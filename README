@@ -1,0 +1,75 @@
+
+Quick Start:
+
+run screen
+create a few shells
+./mscreen
+start typing
+
+detach with control-b d
+Other commands all prefixed by Control-B :(default key bindings)
+'0-9' = toggle whether window 0-9 is selected
+bind['+'] = "select"
+bind['-'] = "unselect"
+bind['a'] = "select_all"
+bind['n'] = "unselect_all"
+bind['s'] = "show_all"
+bind['t'] = "status"
+bind['d'] = "detach"
+bind['r'] = "refresh"
+bind[':'] = "colon"
+bind['b'] = "literal"
+
+Full instructions
+
+This is a program to help manage screens with many sessions. The major 
+feature is the ability to send identical input to all sessions at once. 
+This is useful if you have a web site with several web servers and you want to 
+edit a file on all of them. This allows you to visually interact with 
+all the shells at once.
+
+Commands:
+
+select,unselect,select_all,unselect_all:
+  At startup, mscreen will send keystrokes to all windows in the screen session.
+It will not send input to itself to prevent infinite recursive input stream.
+Use the select commands to change which windows receive input.
+
+status:
+  Display a short message about known windows
+
+literal:
+  Send the literal control character. Control-B by default
+
+refresh:
+  Rebuild the internal list of screens and windows. mscreen does not know when
+you create new windows or when they go away. It can only manage windows it
+knows about. If you create or close windows, you will need to use refresh
+to have mscreen know about them. If the config["autoadd"] is true, when
+detected, the windows will automatically be selected for future input.
+
+show_all:
+  Show all the windows in a grid. By default, a grid of width 1 height N. 
+The dimensions of the grid are configurable using : config["gridx"] and 
+: config["gridy"]. If either is set to -1, then the dimension is variable.
+The default gridx,gridy is (1,-1). Also the config["topdown"] controls the tab
+order of the cells when in a grid that is 2x2 or bigger. 
+
+colon:
+  similar to screen's colon, goes into a command line where you can execute 
+commands. These are python "exec()" statements, so anything goes. eg:
+
+you can re-bind keys by setting the bind[] dict, 
+change the config["gridx"] and config["gridy"] options for show_all
+you can use the sc variable and do things like
+  sc.send_all(["hello world" for x in range(1,20))
+  sc.unselect_all()
+
+Bugs:
+Probably only works on linux
+
+Thanks to this code for getch:
+http://code.activestate.com/recipes/134892-getch-like-unbuffered-character-reading-from-stdin/
+
+email me if you have more suggestions
+

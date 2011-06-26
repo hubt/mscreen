@@ -1,0 +1,389 @@
+#!/usr/bin/python
+
+import getopt
+import sys
+import os
+import getch
+import re
+import time
+import subprocess
+import math
+ 
+# known issues:
+known_issues = """
+Speed: it's slow to exec so many "screen -X stuff 'c'" commands. 
+Could go do some buffering to help it
+
+might work only on linux due to the way ScreenController.update_screens() works
+
+potential infinite input problem if two different windows of a screen
+are both sending input to each other
+
+"""
+
+execfile("mscreen.rc")
+debug = False
+""" load the user config file """
+
+def throttle():
+  """Sometimes commands sent to screen need to be throttled"""
+  time.sleep(config["throttle_time"])
+
+class Window():
+  def __init__(self,session,id,pid):
+    self.session = session
+    self.id = id
+    self.selected = False
+    self.pid = pid
+    if config["autoadd"]:
+      self.select()
+
+  def select(self):
+    """select this window to receive input """
+    self.selected = True
+    # don't select our window otherwise we'd get infinite screen recursion
+    if os.environ.has_key("STY") and os.environ.has_key("WINDOW"):
+      if os.environ["STY"] == self.session and int(os.environ["WINDOW"]) == self.id:
+        print "Ignoring %s %s" % (self.session,self.id)
+        self.selected = False
+    print "Window %s selected" % str(self)
+
+  def unselect(self):
+    """set this window to not receive input """
+    self.selected = False
+    print "Window %s unselected" % str(self)
+
+  def __str__(self):
+    return str([self.session,self.id,self.pid,self.selected])
+    
+class Session():
+  """ A screen session. It may consist of a number of windows """
+  def __init__(self,id):
+    self.id = id
+    self.windows = {}
+    parts = id.split(".")
+    pid = parts[0]
+    if len(parts) == 2:
+      self.name = parts[1]
+      self.pty = ""
+    elif len(parts) == 3:
+      self.name = parts[2]
+      self.pty = parts[1]
+    self.pid = int(pid)
+
+  def selected(self,window=None):
+    """return a list of selected windows"""
+    if window == None:
+      res = [ x for x,y in self.windows.items() if y.selected ]
+      res.sort()
+      return res
+    if not self.windows.has_key(window):
+      return False
+    return self.windows[window].selected
+
+  def select(self,window):
+    """selected a window to receive input"""
+    if not self.windows.has_key(window):
+      print "No window %d in screen %s" % (window,self.id)
+      return
+    if self.selected(window):
+      print "Window %d already selected" % window
+      return
+    self.windows[window].select()
+
+  def unselect(self,window):
+    """selected a window to not receive input"""
+    if not self.windows.has_key(window):
+      print "No window %d in screen %s" % (window,self.id)
+      return
+    if not self.selected(window):
+      print "Window %d already unselected" %window
+      return
+    self.windows[window].unselect()
+
+  def select_all(self,args=None):
+    """select all windows of the screen to receive input"""
+    for w in self.windows.values():
+      w.select()
+
+  def unselect_all(self,args=None):
+    """select no windows of the screen to receive input"""
+    print "Unselecting all"
+    for w in self.windows.values():
+      print "Unselecting %s" %w
+      w.unselect()
+  
+  def __str__(self):
+    s = ",".join([ "%s:%s"%(x,y) for x,y in self.windows.items()])
+    return "{'"+self.id+"':" + s + "}"
+
+class ScreenController:
+  """ The ScreenController sends input into multiple windows of a screen """
+  def __init__(self):
+    self.sessions = {}
+    self.screen = {}
+    self.pipe = subprocess.Popen(["/bin/bash"], shell=False, bufsize=0,stdin=subprocess.PIPE, stdout=subprocess.PIPE, close_fds=True)
+  
+
+  # this might not work anywhere except linux
+  def update_screens(self):
+    """find all screens from /proc"""
+    myuid = os.getuid()
+    new_sessions = {}
+    psout = subprocess.check_output(["ps","-e","-o","pid,ppid,uid,command"])
+    for proc in psout.split("\n"):
+      env = {}
+      words = re.split("\s+",proc.strip(),3)
+      #print "Words: " + str(words)
+      if len(words) < 4:
+        continue
+      (pid,ppid,uid,command) = words
+      if not pid.isdigit() or int(uid) != myuid:
+        continue
+      pid = int(pid)
+      try:
+        for e in open("/proc/%s/environ"%pid, "r").read().split("\x00"):
+          if e == "":
+            continue
+          (name,value) = e.split("=",1)
+          env[name] = value
+        if env.has_key("WINDOW") and env.has_key("STY"):
+          ses = env["STY"]
+          window_id = int(env["WINDOW"])
+          screenpid = ses[0:ses.find(".")]
+          if screenpid == ppid:
+            if not new_sessions.has_key(ses):
+              new_sessions[ses] = Session(ses)
+            w = Window(ses,window_id,pid)
+            if self.sessions.has_key(ses) and self.sessions[ses].windows.has_key(window_id):
+              w.selected = self.sessions[ses].windows[window_id].selected
+            new_sessions[ses].windows[window_id] = w
+      except (IOError,ValueError):
+        pass
+    self.sessions = new_sessions
+    if hasattr(self,"screen_id"):
+      self.screen = new_sessions[self.screen.id]
+    print "Found %d sessions:\n%s" %(len(new_sessions),"\n".join([x for x in new_sessions.keys()]))
+
+  
+  def literal(self,args=None):
+    """send a literal escape character to all windows"""
+    self.send_all("stuff $'\%s'"%(str(oct(ord(escape)))))
+
+  def change_screen(self,session_id=None):
+    """select a different screen to control"""
+    if session_id != None:
+      self.screen = self.sessions[session_id]
+      self.screen_id = session_id
+      return
+
+    print "Attach to screen number or 'exit'"
+    screen_list = []
+    j = 0
+    for k,v in self.sessions.items():
+      print "%5s  %-30s %d windows" %(j,k,len(v.windows))
+      screen_list.append(k)
+      j += 1
+    print "number: ",
+    while True:
+      line = self.readline().strip()
+      if line == "exit" or line == "":
+        sys.exit()
+      elif line.isdigit():
+        screenid = int(line)
+        if screenid <= len(screen_list):
+          self.change_screen(screen_list[screenid-1])
+          break
+    
+  def select(self,window):
+    """select a window to receive input"""
+    self.screen.select(window)
+
+  def unselect(self,window):
+    """select a window to not receive input"""
+    self.screen.select(window)
+
+  def show_all(self,args=None):
+    """change the layout to show all windows"""
+    self.show_grid(config["gridx"],config["gridy"],True)
+
+  def show_grid(self,width=1,height=-1,selected_only=False):
+    """build a pretty grid of screens"""
+    if selected_only:
+      show_windows = [ x for x,y in self.screen.windows.items() if y ]
+    else:
+      show_windows = self.screen.keys()
+    show_windows.sort()
+    print "windows to show: "+str(show_windows)
+    target = show_windows[0]
+    self.send("only",target)
+      
+    if height == -1:
+      height = int(math.ceil(float(len(show_windows))/width))
+    elif width == -1:
+      width = int(math.ceil(float(len(show_windows))/height))
+     
+    print "Creating grid width=%d,height=%d" %(width,height)
+    if config["topdown"]:
+      split_first = "split -v"
+      split_second = "split"
+      range_first = width
+      range_second = height
+    else:
+      split_first = "split"
+      split_second = "split -v"
+      range_first = height
+      range_second = width
+
+    for x in range(1,range_first):
+      self.send(split_first,target)
+      throttle()
+    for x in range(1,range_first+1):
+      for y in range(1,range_second):
+        self.send(split_second,target)
+        throttle()
+        self.send("focus",target)
+      throttle()
+      self.send("focus",target)
+    cells = width*height
+        
+    i = 1
+    for x in show_windows:
+      if i > cells:
+        self.send("focus",show_windows[0])
+        break
+      # sending this too fast seems to cause problems
+      self.send("select %s"%x,show_windows[0])
+      throttle()
+      self.send("focus",show_windows[0])
+      throttle()
+      i+=1
+    # move cursor back to original region
+    while i <= cells:
+      self.send("focus",show_windows[0])
+      i+=1
+
+  def refresh(self,args=None):
+    """refresh the list of screens"""
+    self.update_screens()
+
+  def detach(self,args=None):
+    print "Exiting"
+    sys.exit()
+
+  def readline(self):
+    return sys.stdin.readline().strip()
+
+  def select(self,args=None):
+    print "Available windows:\n%s" % "\n".join([str(x) for x in self.screen.windows.keys()])
+    print "Window(s) to add(space separated):\n"
+    for w in [ int(x) for x in self.readline().strip().split(" ") ]:
+      self.screen.select(w)
+
+  def select_all(self,args=None):
+    self.screen.select_all()
+
+  def unselect(self,args=None):
+    print "Available windows:\n%s" % "\n".join([str(x) for x in self.screen.windows.keys()])
+    print "Window(s) to add(space separated):\n"
+    for w in [ int(x) for x in self.readline().strip().split(" ") ]:
+      self.screen.unselect(w)
+
+    #print "Window to unselect: %s" % str(self.screen)
+    #line = self.readline()
+    #self.screen.unselect(int(line))
+
+  def unselect_all(self,args=None):
+    self.screen.unselect_all()
+
+  def status(self,args=None):
+    print "Known screens:\n%s\n" % "\n".join([ x+ " " + str(len(y.windows)) + " windows" for x,y in self.sessions.items()])
+    print "Selected Screen: %s "%(self.screen.id),
+    print "Windows: selected [%s]"%str(",".join([str(k) for k,v in self.screen.windows.items() if v.selected])),
+    print "unselected [%s]"%str(",".join([str(k) for k,v in self.screen.windows.items() if not v.selected]))
+
+  def colon(self,args=None):
+    print ": ",
+    line = sys.stdin.readline().strip()
+    exec(line) in globals()
+
+  def handle_command(self,line,params=None):
+    print "Executing: %s" % line
+    args = line.split(" ",0)
+    command = args[0]
+    if hasattr(self,command):
+      getattr(self,command)(args)
+      return
+    print "Unknown command "+ command
+    
+
+  def handle_control(self):
+    control_char = getch.getch()
+    control_char_ord = ord(control_char)
+    #print "Control char: %d"%(control_char_ord)
+    if control_char.isdigit():
+      # toggle selection of window
+      wind = int(control_char)
+      if self.screen.selected(wind):
+        self.screen.unselect(wind)
+      else:
+        self.screen.select(wind)
+    elif bind.has_key(control_char):
+      command = bind[control_char]
+      self.handle_command(command)
+
+  
+  def send(self,cmd,window=None):
+    """ send a single command to the session.
+
+    An optional integer window specifies which window to send the command to
+    """
+    if window == None:
+      com = "screen -S %s -X %s\n" % (self.screen.id,cmd)
+    else:
+      com = "screen -S %s -p %d -X %s\n" % (self.screen.id,window,cmd)
+    if debug:
+      print "Sending: " + com
+    self.pipe.stdin.write(com)
+
+  def send_all(self,cmd,window=None):
+    """ send a command to all selected windows """
+    for id in [ id for id,wind in self.screen.windows.items() if wind.selected ]:
+      self.send(cmd,id)
+    
+  def stuff(self,cmd,window=None):
+    """ send a character to the session.
+
+    An optional integer window specifies which windo to send to
+    """
+    self.send("stuff '%s'"%cmd,window)
+
+  def stuff_all(self,cmd,window=None):
+    """send a character to all windows"""
+    self.send_all("stuff '%s'"%cmd,window)
+
+  def run(self):
+    """ main loop """
+    while True:
+      char = getch.getch()
+      char_ord = ord(char)
+      if char == escape:
+        self.handle_control()
+      else:
+        self.stuff_all(char)
+    
+opts = getopt.getopt(sys.argv[1:],"x:p:")
+sc = ScreenController()
+sc.update_screens()
+if os.environ.get("STY") :
+  sc.change_screen(os.environ.get("STY"))
+elif len(sc.sessions.keys()) == 0:
+  print "Creating new session"
+  sys.exit()
+else:
+  sc.change_screen()
+sc.show_all()
+  
+sc.run()
+
+

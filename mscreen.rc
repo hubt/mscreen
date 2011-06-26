@@ -1,0 +1,29 @@
+"""
+eval'ed so this must be valid python
+"""
+
+escape = chr(2) # control-b
+bind = {}
+bind['+'] = "select"
+bind['-'] = "unselect"
+bind['a'] = "select_all"
+bind['n'] = "unselect_all"
+bind['s'] = "show_all"
+bind['t'] = "status"
+bind['d'] = "detach"
+bind['r'] = "refresh"
+bind[':'] = "colon"
+bind['b'] = "literal"
+
+config = {}
+config["gridx"] = 1
+config["gridy"] = -1
+""" when doing a show_all, use a grid of gridx,gridy size for the windows.
+-1 indicates a variable size """
+config["autoadd"] = True
+""" when doing a refresh of the window list, should new windows be 
+automatically added to the set of selected windows"""
+config["topdown"] = True
+""" In a grid of windows, should tab order be topdown first or leftright first """
+config["throttle_time"] = .4
+
